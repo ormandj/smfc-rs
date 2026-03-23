@@ -1,0 +1,23 @@
+[package]
+name = "smfc-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94.0"
+description = "Supermicro fan controller — PID-based multi-source thermal management via IPMI"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+nix = { version = "0.30", features = ["ioctl", "poll"] }
+signal-hook = "0.3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

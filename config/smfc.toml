@@ -1,0 +1,107 @@
+# smfc-rs configuration for Quasar (H12SSL-i, EPYC 7663)
+#
+# Zone 0 (FAN1-5): Compute chamber — CPU, GPUs, NIC, NVMe
+# Zone 1 (FANA/B): Storage chamber — HDDs
+#
+# warn_temp is auto-detected from hwmon temp*_max when available.
+# Config warn_temp overrides only if it's lower than the hardware-reported value.
+
+[general]
+ipmi_device = "/dev/ipmi0"
+log_level = "info"
+min_duty_zone0 = 25
+min_duty_zone1 = 25
+
+# --- Zone 0: Compute Chamber ---
+
+[[controllers]]
+name = "cpu"
+hwmon_driver = "k10temp"
+zone = "zone0"
+poll_interval_secs = 5
+enabled = true
+temp_selector = { Specific = "Tctl" }
+
+[controllers.pid]
+setpoint = 60.0
+kp = 2.0
+ki = 0.1
+kd = 1.0
+min_duty = 25
+max_duty = 100
+max_rate = 5.0
+d_filter = 0.3
+
+[[controllers]]
+name = "gpu"
+hwmon_driver = "nvidia"
+zone = "zone0"
+poll_interval_secs = 3
+enabled = true
+temp_selector = "Max"
+
+[controllers.pid]
+setpoint = 70.0
+kp = 2.5
+ki = 0.08
+kd = 1.5
+min_duty = 25
+max_duty = 100
+max_rate = 5.0
+d_filter = 0.3
+
+[[controllers]]
+name = "nic"
+hwmon_driver = "mlx5_core"
+zone = "zone0"
+poll_interval_secs = 10
+enabled = true
+temp_selector = "Max"
+
+[controllers.pid]
+setpoint = 65.0
+kp = 1.5
+ki = 0.05
+kd = 0.5
+min_duty = 25
+max_duty = 100
+max_rate = 3.0
+d_filter = 0.3
+
+[[controllers]]
+name = "nvme"
+hwmon_driver = "nvme"
+zone = "zone0"
+poll_interval_secs = 10
+enabled = true
+temp_selector = "Max"
+
+[controllers.pid]
+setpoint = 55.0
+kp = 2.0
+ki = 0.1
+kd = 1.0
+min_duty = 25
+max_duty = 100
+max_rate = 3.0
+d_filter = 0.3
+
+# --- Zone 1: Storage Chamber ---
+
+[[controllers]]
+name = "hdd"
+hwmon_driver = "drivetemp"
+zone = "zone1"
+poll_interval_secs = 30
+enabled = true
+temp_selector = "Max"
+
+[controllers.pid]
+setpoint = 40.0
+kp = 3.0
+ki = 0.15
+kd = 1.0
+min_duty = 25
+max_duty = 100
+max_rate = 3.0
+d_filter = 0.3
