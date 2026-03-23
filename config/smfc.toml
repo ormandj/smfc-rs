@@ -24,6 +24,7 @@ temp_selector = { Specific = "Tctl" }
 
 [controllers.pid]
 setpoint = 60.0
+warn_temp = 80.0  # k10temp has no temp*_max; EPYC 7663 Tctl_max ~95°C, warn well before
 kp = 2.0
 ki = 0.1
 kd = 1.0

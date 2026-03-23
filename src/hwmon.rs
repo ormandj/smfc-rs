@@ -13,6 +13,8 @@ pub struct HwmonSensor {
     pub temp_path: PathBuf,
     /// Hardware-reported maximum temperature from temp*_max (°C), if available
     pub max_temp: Option<f64>,
+    /// Hardware-reported critical temperature from temp*_crit (°C), if available
+    pub crit_temp: Option<f64>,
 }
 
 impl HwmonSensor {
@@ -115,6 +117,7 @@ fn discover_sensors_in(base: &str, driver_name: &str) -> Result<Vec<HwmonSensor>
                 label,
                 temp_path,
                 max_temp,
+                crit_temp,
             });
         }
     }
@@ -132,7 +135,11 @@ fn discover_sensors_in(base: &str, driver_name: &str) -> Result<Vec<HwmonSensor>
 /// If a config override is provided, uses the lower of the two.
 /// Returns None if neither source provides a value.
 pub fn effective_warn_temp(sensors: &[HwmonSensor], config_override: Option<f64>) -> Option<f64> {
-    let hw_max = sensors.iter().filter_map(|s| s.max_temp).reduce(f64::min);
+    // Prefer temp*_max, fall back to temp*_crit if max isn't available
+    let hw_max = sensors
+        .iter()
+        .filter_map(|s| s.max_temp.or(s.crit_temp))
+        .reduce(f64::min);
 
     match (hw_max, config_override) {
         (Some(hw), Some(cfg)) => Some(hw.min(cfg)),
@@ -151,6 +158,7 @@ mod tests {
             label: None,
             temp_path: PathBuf::from("/nonexistent"),
             max_temp,
+            crit_temp: None,
         }
     }
 
@@ -182,5 +190,16 @@ mod tests {
     fn warn_temp_none() {
         let sensors = vec![sensor(None)];
         assert_eq!(effective_warn_temp(&sensors, None), None);
+    }
+
+    #[test]
+    fn warn_temp_falls_back_to_crit() {
+        let sensors = vec![HwmonSensor {
+            label: None,
+            temp_path: PathBuf::from("/nonexistent"),
+            max_temp: None,
+            crit_temp: Some(105.0),
+        }];
+        assert_eq!(effective_warn_temp(&sensors, None), Some(105.0));
     }
 }
