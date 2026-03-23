@@ -106,8 +106,11 @@ struct IpmiRecv {
     msg: IpmiMsg,
 }
 
-// Generate ioctl request/response function numbers
-nix::ioctl_write_ptr!(
+// Generate ioctl request/response function numbers.
+// Linux IPMI ioctls famously use backwards direction macros:
+// IPMICTL_SEND_COMMAND is _IOR (not _IOW) in the kernel headers.
+// We must match the kernel's ioctl numbers exactly.
+nix::ioctl_read!(
     ipmi_send_command,
     IPMI_IOC_MAGIC,
     IPMICTL_SEND_COMMAND,
@@ -160,7 +163,7 @@ impl IpmiDevice {
 
         let mut send_data = data.to_vec();
 
-        let req = IpmiReq {
+        let mut req = IpmiReq {
             addr: &mut addr as *mut _,
             addr_len: std::mem::size_of::<IpmiSystemInterfaceAddr>() as u32,
             msgid: 1,
@@ -178,7 +181,7 @@ impl IpmiDevice {
 
         // Send
         unsafe {
-            ipmi_send_command(self.fd, &req)
+            ipmi_send_command(self.fd, &mut req)
                 .map_err(|e| Error::Ipmi(format!("ioctl send failed: {e}")))?;
         }
 

@@ -53,7 +53,7 @@ d_filter = 0.3
 
 [[controllers]]
 name = "nic"
-hwmon_driver = "mlx5_core"
+hwmon_driver = "mlx5"
 zone = "zone0"
 poll_interval_secs = 10
 enabled = true
