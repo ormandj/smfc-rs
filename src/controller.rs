@@ -159,17 +159,40 @@ impl ThermalController {
                 })
             }
             TempSelector::Specific(label) => {
-                let sensor = self
+                let matching: Vec<_> = self
                     .sensors
                     .iter()
-                    .find(|s| s.label.as_deref() == Some(label))
-                    .ok_or_else(|| {
-                        crate::error::Error::Hwmon(format!(
-                            "no sensor with label '{label}' found for {}",
-                            self.name
-                        ))
-                    })?;
-                sensor.read_temp()
+                    .filter(|s| s.label.as_deref() == Some(label.as_str()))
+                    .collect();
+                if matching.is_empty() {
+                    return Err(crate::error::Error::Hwmon(format!(
+                        "no sensor with label '{label}' found for {}",
+                        self.name
+                    )));
+                }
+                let mut max_temp: Option<f64> = None;
+                let mut last_err = None;
+                for sensor in &matching {
+                    match sensor.read_temp() {
+                        Ok(t) => {
+                            max_temp = Some(max_temp.map_or(t, |cur: f64| cur.max(t)));
+                        }
+                        Err(e) => {
+                            warn!(
+                                controller = %self.name,
+                                sensor = %sensor.temp_path.display(),
+                                error = %e,
+                                "individual sensor read failed"
+                            );
+                            last_err = Some(e);
+                        }
+                    }
+                }
+                max_temp.ok_or_else(|| {
+                    last_err.unwrap_or_else(|| {
+                        crate::error::Error::Hwmon("no sensors available".to_string())
+                    })
+                })
             }
         }
     }

@@ -128,8 +128,16 @@ fn main() {
             continue;
         }
 
-        // Determine effective warn_temp
-        let warn_temp = match hwmon::effective_warn_temp(&sensors, ctrl_cfg.pid.warn_temp) {
+        // For Specific label selector, filter sensors to matching label for warn_temp
+        let warn_sensors: Vec<_> = match &ctrl_cfg.temp_selector {
+            config::TempSelector::Specific(label) => sensors
+                .iter()
+                .filter(|s| s.label.as_deref() == Some(label.as_str()))
+                .cloned()
+                .collect(),
+            config::TempSelector::Max => sensors.clone(),
+        };
+        let warn_temp = match hwmon::effective_warn_temp(&warn_sensors, ctrl_cfg.pid.warn_temp) {
             Some(t) => t,
             None => {
                 error!(
