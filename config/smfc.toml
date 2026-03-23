@@ -3,8 +3,11 @@
 # Zone 0 (FAN1-5): Compute chamber — CPU, GPUs, NIC, NVMe
 # Zone 1 (FANA/B): Storage chamber — HDDs
 #
-# warn_temp is auto-detected from hwmon temp*_max when available.
+# warn_temp is auto-detected from hwmon temp*_max (or temp*_crit fallback).
 # Config warn_temp overrides only if it's lower than the hardware-reported value.
+#
+# PID gains are auto-derived from thermal_mass + active_cooling.
+# Set explicit kp/ki/kd to override the auto-derived values.
 
 [general]
 ipmi_device = "/dev/ipmi0"
@@ -23,15 +26,10 @@ enabled = true
 temp_selector = { Specific = "Tctl" }
 
 [controllers.pid]
-setpoint = 60.0
-warn_temp = 80.0  # k10temp has no temp*_max; EPYC 7663 Tctl_max ~95°C, warn well before
-kp = 2.0
-ki = 0.1
-kd = 1.0
-min_duty = 25
-max_duty = 100
-max_rate = 5.0
-d_filter = 0.3
+setpoint = 50.0
+warn_temp = 80.0      # k10temp has no temp*_max; EPYC Tctl_max ~95°C
+thermal_mass = "medium"
+active_cooling = true  # FAN5 on CPU heatsink
 
 [[controllers]]
 name = "gpu"
@@ -43,13 +41,8 @@ temp_selector = "Max"
 
 [controllers.pid]
 setpoint = 70.0
-kp = 2.5
-ki = 0.08
-kd = 1.5
-min_duty = 25
-max_duty = 100
-max_rate = 5.0
-d_filter = 0.3
+thermal_mass = "medium"
+active_cooling = true  # blower fan on GPU
 
 [[controllers]]
 name = "nic"
@@ -60,14 +53,9 @@ enabled = true
 temp_selector = "Max"
 
 [controllers.pid]
-setpoint = 65.0
-kp = 1.5
-ki = 0.05
-kd = 0.5
-min_duty = 25
-max_duty = 100
-max_rate = 3.0
-d_filter = 0.3
+setpoint = 85.0        # CX-6 runs full speed to 105°C, no throttling
+thermal_mass = "high"  # large passive heatsink
+active_cooling = false # entirely dependent on case airflow
 
 [[controllers]]
 name = "nvme"
@@ -75,17 +63,12 @@ hwmon_driver = "nvme"
 zone = "zone0"
 poll_interval_secs = 10
 enabled = true
-temp_selector = "Max"
+temp_selector = { Specific = "Composite" }
 
 [controllers.pid]
 setpoint = 55.0
-kp = 2.0
-ki = 0.1
-kd = 1.0
-min_duty = 25
-max_duty = 100
-max_rate = 3.0
-d_filter = 0.3
+thermal_mass = "medium" # mix of E1.S 15mm (aluminum heatsink shell) and bare M.2
+active_cooling = false
 
 # --- Zone 1: Storage Chamber ---
 
@@ -99,10 +82,5 @@ temp_selector = "Max"
 
 [controllers.pid]
 setpoint = 40.0
-kp = 3.0
-ki = 0.15
-kd = 1.0
-min_duty = 25
-max_duty = 100
-max_rate = 3.0
-d_filter = 0.3
+thermal_mass = "high"  # metal drive bodies, slow thermal response
+active_cooling = false

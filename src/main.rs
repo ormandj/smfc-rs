@@ -148,6 +148,7 @@ fn main() {
             }
         };
 
+        let resolved = ctrl_cfg.pid.resolve();
         info!(
             controller = %ctrl_cfg.name,
             driver = %ctrl_cfg.hwmon_driver,
@@ -155,6 +156,11 @@ fn main() {
             zone = ?ctrl_cfg.zone,
             setpoint = format!("{:.0}°C", ctrl_cfg.pid.setpoint),
             warn_temp = format!("{warn_temp:.0}°C"),
+            thermal_mass = ?ctrl_cfg.pid.thermal_mass,
+            active_cooling = ctrl_cfg.pid.active_cooling,
+            kp = format!("{:.2}", resolved.kp),
+            ki = format!("{:.3}", resolved.ki),
+            kd = format!("{:.2}", resolved.kd),
             "initialized"
         );
 

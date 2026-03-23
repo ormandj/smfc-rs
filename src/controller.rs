@@ -23,15 +23,16 @@ pub struct ThermalController {
 
 impl ThermalController {
     pub fn new(config: &ControllerConfig, sensors: Vec<HwmonSensor>, warn_temp: f64) -> Self {
+        let resolved = config.pid.resolve();
         let pid = PidController::new(PidParams {
-            setpoint: config.pid.setpoint,
-            kp: config.pid.kp,
-            ki: config.pid.ki,
-            kd: config.pid.kd,
-            min_output: config.pid.min_duty as f64,
-            max_output: config.pid.max_duty as f64,
-            max_rate: config.pid.max_rate,
-            d_filter: config.pid.d_filter,
+            setpoint: resolved.setpoint,
+            kp: resolved.kp,
+            ki: resolved.ki,
+            kd: resolved.kd,
+            min_output: resolved.min_duty as f64,
+            max_output: resolved.max_duty as f64,
+            max_rate: resolved.max_rate,
+            d_filter: resolved.d_filter,
         });
 
         Self {
