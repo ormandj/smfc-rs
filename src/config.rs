@@ -149,8 +149,9 @@ impl PidConfig {
             ThermalMass::High => (1.0, 0.02, 2.0, 3.0, 0.15),
         };
 
-        // Active cooling reduces all gains — case fans are supplementary
-        let active_scale = if self.active_cooling { 0.5 } else { 1.0 };
+        // Active cooling reduces gains — case fans are supplementary but still
+        // needed for ambient air. 0.7x keeps reasonable responsiveness.
+        let active_scale = if self.active_cooling { 0.7 } else { 1.0 };
 
         ResolvedPidParams {
             setpoint: self.setpoint,
