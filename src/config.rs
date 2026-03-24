@@ -29,7 +29,11 @@ pub struct GeneralConfig {
 #[derive(Debug, Deserialize)]
 pub struct ControllerConfig {
     pub name: String,
-    pub hwmon_driver: String,
+    /// hwmon driver name (e.g., "k10temp", "nvme"). Mutually exclusive with ipmi_sensors.
+    pub hwmon_driver: Option<String>,
+    /// IPMI sensor IDs to read via "Get Sensor Reading" command. Mutually exclusive with hwmon_driver.
+    #[serde(default)]
+    pub ipmi_sensors: Vec<IpmiSensorConfig>,
     pub zone: ZoneId,
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
@@ -38,6 +42,16 @@ pub struct ControllerConfig {
     #[serde(default)]
     pub temp_selector: TempSelector,
     pub pid: PidConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IpmiSensorConfig {
+    /// IPMI sensor number (e.g., 0x74 for GPU5)
+    pub id: u8,
+    /// Human-readable label for logging
+    pub label: String,
+    /// Upper non-critical threshold from BMC SDR (used as warn_temp)
+    pub warn_temp: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Hash)]
@@ -187,6 +201,18 @@ pub fn load(path: &str) -> crate::error::Result<AppConfig> {
         ));
     }
     for c in &config.controllers {
+        if c.hwmon_driver.is_none() && c.ipmi_sensors.is_empty() {
+            return Err(crate::error::Error::Config(format!(
+                "controller '{}': must have either hwmon_driver or ipmi_sensors",
+                c.name
+            )));
+        }
+        if c.hwmon_driver.is_some() && !c.ipmi_sensors.is_empty() {
+            return Err(crate::error::Error::Config(format!(
+                "controller '{}': hwmon_driver and ipmi_sensors are mutually exclusive",
+                c.name
+            )));
+        }
         if c.pid.setpoint <= 0.0 {
             return Err(crate::error::Error::Config(format!(
                 "controller '{}': setpoint must be positive",

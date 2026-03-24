@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tracing::{debug, error, warn};
@@ -5,14 +6,54 @@ use tracing::{debug, error, warn};
 use crate::config::{ControllerConfig, TempSelector, ZoneId};
 use crate::error::Result;
 use crate::hwmon::HwmonSensor;
+use crate::ipmi::IpmiDevice;
 use crate::pid::{PidController, PidParams};
 use crate::zone::ControllerOutput;
+
+/// A temperature sensor that can be read.
+pub enum TempSensor {
+    Hwmon(HwmonSensor),
+    Ipmi {
+        device: Arc<IpmiDevice>,
+        sensor_id: u8,
+        label: String,
+    },
+}
+
+impl TempSensor {
+    pub fn read_temp(&self) -> Result<f64> {
+        match self {
+            TempSensor::Hwmon(s) => s.read_temp(),
+            TempSensor::Ipmi {
+                device,
+                sensor_id,
+                label: _,
+            } => crate::ipmi::read_sensor_temp(device, *sensor_id),
+        }
+    }
+
+    pub fn label(&self) -> Option<&str> {
+        match self {
+            TempSensor::Hwmon(s) => s.label.as_deref(),
+            TempSensor::Ipmi { label, .. } => Some(label.as_str()),
+        }
+    }
+
+    pub fn display_name(&self) -> String {
+        match self {
+            TempSensor::Hwmon(s) => format!("{}", s.temp_path.display()),
+            TempSensor::Ipmi {
+                sensor_id, label, ..
+            } => format!("ipmi:0x{sensor_id:02x}({label})"),
+        }
+    }
+}
 
 /// A thermal controller that reads sensors, runs a PID loop, and outputs a duty.
 pub struct ThermalController {
     pub name: String,
     pub zone: ZoneId,
-    sensors: Vec<HwmonSensor>,
+    sensors: Vec<TempSensor>,
     temp_selector: TempSelector,
     pid: PidController,
     warn_temp: f64,
@@ -22,7 +63,7 @@ pub struct ThermalController {
 }
 
 impl ThermalController {
-    pub fn new(config: &ControllerConfig, sensors: Vec<HwmonSensor>, warn_temp: f64) -> Self {
+    pub fn new(config: &ControllerConfig, sensors: Vec<TempSensor>, warn_temp: f64) -> Self {
         let resolved = config.pid.resolve();
         let pid = PidController::new(PidParams {
             setpoint: resolved.setpoint,
@@ -49,16 +90,12 @@ impl ThermalController {
     }
 
     /// Check if it's time to poll, and if so, read sensors and compute duty.
-    ///
-    /// Returns `None` if it's not yet time to poll.
-    /// Returns `Some(output)` with the computed duty and warning status.
     pub fn poll(&mut self) -> Option<ControllerOutput> {
         let now = Instant::now();
 
         if let Some(last) = self.last_poll
             && now.duration_since(last) < self.poll_interval
         {
-            // Not time yet — return the last output if we have one
             return self.last_temp.map(|temp| ControllerOutput {
                 zone: self.zone.clone(),
                 duty: self.pid.output() as u8,
@@ -75,7 +112,6 @@ impl ThermalController {
 
         self.last_poll = Some(now);
 
-        // Read temperature
         let temp = match self.read_temp() {
             Ok(t) => {
                 self.last_temp = Some(t);
@@ -86,7 +122,6 @@ impl ThermalController {
                 match self.last_temp {
                     Some(t) => t,
                     None => {
-                        // No previous reading — assume worst case
                         error!(controller = %self.name, "no previous temp reading, assuming warn_temp");
                         self.warn_temp
                     }
@@ -94,7 +129,6 @@ impl ThermalController {
             }
         };
 
-        // Check warn_temp — immediate 100% override
         if temp >= self.warn_temp {
             warn!(
                 controller = %self.name,
@@ -111,7 +145,6 @@ impl ThermalController {
             });
         }
 
-        // Normal PID control
         let duty = self.pid.update(temp, dt);
         let duty_u8 = (duty.round() as u8).min(100);
 
@@ -134,67 +167,65 @@ impl ThermalController {
 
     fn read_temp(&self) -> Result<f64> {
         match &self.temp_selector {
-            TempSelector::Max => {
-                let mut max_temp: Option<f64> = None;
-                let mut last_err = None;
-                for sensor in &self.sensors {
-                    match sensor.read_temp() {
-                        Ok(t) => {
-                            max_temp = Some(max_temp.map_or(t, |cur: f64| cur.max(t)));
-                        }
-                        Err(e) => {
-                            warn!(
-                                controller = %self.name,
-                                sensor = %sensor.temp_path.display(),
-                                error = %e,
-                                "individual sensor read failed"
-                            );
-                            last_err = Some(e);
-                        }
-                    }
+            TempSelector::Max => self.read_max_all(),
+            TempSelector::Specific(label) => self.read_max_by_label(label),
+        }
+    }
+
+    fn read_max_all(&self) -> Result<f64> {
+        let mut max_temp: Option<f64> = None;
+        let mut last_err = None;
+        for sensor in &self.sensors {
+            match sensor.read_temp() {
+                Ok(t) => max_temp = Some(max_temp.map_or(t, |cur: f64| cur.max(t))),
+                Err(e) => {
+                    warn!(
+                        controller = %self.name,
+                        sensor = %sensor.display_name(),
+                        error = %e,
+                        "individual sensor read failed"
+                    );
+                    last_err = Some(e);
                 }
-                max_temp.ok_or_else(|| {
-                    last_err.unwrap_or_else(|| {
-                        crate::error::Error::Hwmon("no sensors available".to_string())
-                    })
-                })
-            }
-            TempSelector::Specific(label) => {
-                let matching: Vec<_> = self
-                    .sensors
-                    .iter()
-                    .filter(|s| s.label.as_deref() == Some(label.as_str()))
-                    .collect();
-                if matching.is_empty() {
-                    return Err(crate::error::Error::Hwmon(format!(
-                        "no sensor with label '{label}' found for {}",
-                        self.name
-                    )));
-                }
-                let mut max_temp: Option<f64> = None;
-                let mut last_err = None;
-                for sensor in &matching {
-                    match sensor.read_temp() {
-                        Ok(t) => {
-                            max_temp = Some(max_temp.map_or(t, |cur: f64| cur.max(t)));
-                        }
-                        Err(e) => {
-                            warn!(
-                                controller = %self.name,
-                                sensor = %sensor.temp_path.display(),
-                                error = %e,
-                                "individual sensor read failed"
-                            );
-                            last_err = Some(e);
-                        }
-                    }
-                }
-                max_temp.ok_or_else(|| {
-                    last_err.unwrap_or_else(|| {
-                        crate::error::Error::Hwmon("no sensors available".to_string())
-                    })
-                })
             }
         }
+        max_temp.ok_or_else(|| {
+            last_err
+                .unwrap_or_else(|| crate::error::Error::Hwmon("no sensors available".to_string()))
+        })
+    }
+
+    fn read_max_by_label(&self, label: &str) -> Result<f64> {
+        let matching: Vec<_> = self
+            .sensors
+            .iter()
+            .filter(|s| s.label() == Some(label))
+            .collect();
+        if matching.is_empty() {
+            return Err(crate::error::Error::Hwmon(format!(
+                "no sensor with label '{label}' found for {}",
+                self.name
+            )));
+        }
+        let mut max_temp: Option<f64> = None;
+        let mut last_err = None;
+        for sensor in &matching {
+            match sensor.read_temp() {
+                Ok(t) => max_temp = Some(max_temp.map_or(t, |cur: f64| cur.max(t))),
+                Err(e) => {
+                    warn!(
+                        controller = %self.name,
+                        sensor = %sensor.display_name(),
+                        error = %e,
+                        "individual sensor read failed"
+                    );
+                    last_err = Some(e);
+                }
+            }
+        }
+        max_temp.ok_or_else(|| {
+            last_err
+                .unwrap_or_else(|| crate::error::Error::Hwmon("no sensors available".to_string()))
+        })
     }
 }

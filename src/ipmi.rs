@@ -260,6 +260,31 @@ pub fn set_fan_mode(dev: &IpmiDevice, mode: FanMode) -> Result<()> {
     Ok(())
 }
 
+/// Read a temperature sensor by IPMI sensor number.
+/// Uses standard IPMI "Get Sensor Reading" command (NetFn 0x04, Cmd 0x2D).
+/// Returns temperature in degrees Celsius.
+pub fn read_sensor_temp(dev: &IpmiDevice, sensor_id: u8) -> Result<f64> {
+    let resp = dev.raw_command(0x04, 0x2D, &[sensor_id])?;
+    if resp.len() < 2 {
+        return Err(Error::Ipmi(format!(
+            "sensor 0x{sensor_id:02x}: response too short ({} bytes)",
+            resp.len()
+        )));
+    }
+    // Byte 0 = raw reading, Byte 1 = sensor status (bit 5 = reading unavailable)
+    if resp[1] & 0x20 != 0 {
+        return Err(Error::Ipmi(format!(
+            "sensor 0x{sensor_id:02x}: reading unavailable"
+        )));
+    }
+    let temp = resp[0] as f64;
+    trace!(
+        sensor_id = format!("0x{sensor_id:02x}"),
+        temp, "read IPMI sensor"
+    );
+    Ok(temp)
+}
+
 /// Set the fan duty cycle for a zone (0-100%).
 pub fn set_fan_duty(dev: &IpmiDevice, zone: IpmiZone, duty: u8) -> Result<()> {
     let duty = duty.min(100);

@@ -14,7 +14,7 @@ use std::time::Duration;
 use clap::Parser;
 use tracing::{error, info, warn};
 
-use crate::controller::ThermalController;
+use crate::controller::{TempSensor, ThermalController};
 use crate::ipmi::{FanMode, IpmiZone};
 use crate::zone::{ControllerOutput, ZoneArbitrator};
 
@@ -34,7 +34,6 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
 
-    // Load config first (need log_level before initializing tracing)
     let cfg = match config::load(&cli.config) {
         Ok(c) => c,
         Err(e) => {
@@ -43,7 +42,6 @@ fn main() {
         }
     };
 
-    // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -56,10 +54,10 @@ fn main() {
         info!("dry-run mode enabled — will not send IPMI commands");
     }
 
-    // Open IPMI device
-    let ipmi_dev = if !cli.dry_run {
+    // Open IPMI device (shared across controllers for IPMI sensor reads + fan control)
+    let ipmi_dev: Option<Arc<ipmi::IpmiDevice>> = if !cli.dry_run {
         match ipmi::IpmiDevice::open(&cfg.general.ipmi_device) {
-            Ok(dev) => Some(dev),
+            Ok(dev) => Some(Arc::new(dev)),
             Err(e) => {
                 error!(error = %e, "failed to open IPMI device — are ipmi_devintf and ipmi_si kernel modules loaded?");
                 std::process::exit(1);
@@ -94,20 +92,14 @@ fn main() {
         None
     };
 
-    // Register SIGTERM handler
+    // Register signal handlers
     let shutdown = Arc::new(AtomicBool::new(false));
-    {
+    for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
         let shutdown = Arc::clone(&shutdown);
-        signal_hook::flag::register(signal_hook::consts::SIGTERM, shutdown)
-            .expect("failed to register SIGTERM handler");
-    }
-    {
-        let shutdown = Arc::clone(&shutdown);
-        signal_hook::flag::register(signal_hook::consts::SIGINT, shutdown)
-            .expect("failed to register SIGINT handler");
+        signal_hook::flag::register(sig, shutdown).expect("failed to register signal handler");
     }
 
-    // Discover sensors and build controllers
+    // Build controllers
     let mut controllers: Vec<ThermalController> = Vec::new();
     for ctrl_cfg in &cfg.controllers {
         if !ctrl_cfg.enabled {
@@ -115,43 +107,16 @@ fn main() {
             continue;
         }
 
-        let sensors = match hwmon::discover_sensors(&ctrl_cfg.hwmon_driver) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(controller = %ctrl_cfg.name, error = %e, "sensor discovery failed, disabling");
-                continue;
-            }
-        };
-
-        if sensors.is_empty() {
-            warn!(controller = %ctrl_cfg.name, driver = %ctrl_cfg.hwmon_driver, "no sensors found, disabling");
-            continue;
-        }
-
-        // For Specific label selector, filter sensors to matching label for warn_temp
-        let warn_sensors: Vec<_> = match &ctrl_cfg.temp_selector {
-            config::TempSelector::Specific(label) => sensors
-                .iter()
-                .filter(|s| s.label.as_deref() == Some(label.as_str()))
-                .cloned()
-                .collect(),
-            config::TempSelector::Max => sensors.clone(),
-        };
-        let warn_temp = match hwmon::effective_warn_temp(&warn_sensors, ctrl_cfg.pid.warn_temp) {
-            Some(t) => t,
-            None => {
-                error!(
-                    controller = %ctrl_cfg.name,
-                    "no warn_temp available (not in hwmon temp*_max and not in config) — cannot safely control this device"
-                );
-                std::process::exit(1);
-            }
+        // Build sensors from either hwmon or IPMI source
+        let (sensors, warn_temp) = match build_sensors(ctrl_cfg, &ipmi_dev) {
+            Some(result) => result,
+            None => continue,
         };
 
         let resolved = ctrl_cfg.pid.resolve();
         info!(
             controller = %ctrl_cfg.name,
-            driver = %ctrl_cfg.hwmon_driver,
+            source = if ctrl_cfg.hwmon_driver.is_some() { "hwmon" } else { "ipmi" },
             sensors = sensors.len(),
             zone = ?ctrl_cfg.zone,
             setpoint = format!("{:.0}°C", ctrl_cfg.pid.setpoint),
@@ -172,13 +137,11 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Zone arbitrator
     let mut arbitrator =
         ZoneArbitrator::new(cfg.general.min_duty_zone0, cfg.general.min_duty_zone1);
 
     info!(controllers = controllers.len(), "starting control loop");
 
-    // Main control loop
     let tick = Duration::from_secs(1);
     let mut log_counter: u32 = 0;
 
@@ -197,10 +160,8 @@ fn main() {
             continue;
         }
 
-        // Check for warnings — any controller at warn_temp bypasses normal arbitration
         let any_warning = outputs.iter().any(|o| o.warning);
         if any_warning {
-            // Force all zones with warnings to 100%
             for output in &outputs {
                 if output.warning
                     && let Some(dev) = &ipmi_dev
@@ -215,7 +176,6 @@ fn main() {
             }
         }
 
-        // Normal arbitration for non-warning state
         if !any_warning {
             let updates = arbitrator.arbitrate(&outputs);
             for update in &updates {
@@ -227,7 +187,6 @@ fn main() {
                 }
             }
 
-            // Periodic status log (every 30 seconds)
             log_counter += 1;
             if log_counter >= 30 || !updates.is_empty() {
                 log_counter = 0;
@@ -236,7 +195,6 @@ fn main() {
         }
     }
 
-    // Shutdown: restore saved fan mode
     info!("shutdown requested");
     if let (Some(dev), Some(mode)) = (&ipmi_dev, saved_mode) {
         info!(mode = %mode, "restoring BMC fan mode");
@@ -245,6 +203,118 @@ fn main() {
         } else {
             info!(mode = %mode, "fan mode restored — BMC resumes automatic management");
         }
+    }
+}
+
+/// Build sensors and determine warn_temp for a controller config.
+/// Returns None if the controller should be disabled (no sensors found).
+fn build_sensors(
+    ctrl_cfg: &config::ControllerConfig,
+    ipmi_dev: &Option<Arc<ipmi::IpmiDevice>>,
+) -> Option<(Vec<TempSensor>, f64)> {
+    if let Some(ref driver) = ctrl_cfg.hwmon_driver {
+        // hwmon-based controller
+        let hwmon_sensors = match hwmon::discover_sensors(driver) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(controller = %ctrl_cfg.name, error = %e, "sensor discovery failed, disabling");
+                return None;
+            }
+        };
+
+        if hwmon_sensors.is_empty() {
+            warn!(controller = %ctrl_cfg.name, driver = %driver, "no sensors found, disabling");
+            return None;
+        }
+
+        // Filter sensors by label for warn_temp if using Specific selector
+        let warn_sensors: Vec<_> = match &ctrl_cfg.temp_selector {
+            config::TempSelector::Specific(label) => hwmon_sensors
+                .iter()
+                .filter(|s| s.label.as_deref() == Some(label.as_str()))
+                .cloned()
+                .collect(),
+            config::TempSelector::Max => hwmon_sensors.clone(),
+        };
+        let warn_temp = match hwmon::effective_warn_temp(&warn_sensors, ctrl_cfg.pid.warn_temp) {
+            Some(t) => t,
+            None => {
+                error!(
+                    controller = %ctrl_cfg.name,
+                    "no warn_temp available (not in hwmon and not in config)"
+                );
+                std::process::exit(1);
+            }
+        };
+
+        let sensors = hwmon_sensors.into_iter().map(TempSensor::Hwmon).collect();
+        Some((sensors, warn_temp))
+    } else if !ctrl_cfg.ipmi_sensors.is_empty() {
+        // IPMI-based controller
+        let dev = match ipmi_dev {
+            Some(dev) => Arc::clone(dev),
+            None => {
+                warn!(controller = %ctrl_cfg.name, "IPMI sensors configured but no IPMI device (dry-run?), disabling");
+                return None;
+            }
+        };
+
+        let mut sensors = Vec::new();
+        let mut warn_temp: Option<f64> = ctrl_cfg.pid.warn_temp;
+
+        for sensor_cfg in &ctrl_cfg.ipmi_sensors {
+            // Test-read the sensor to see if it's present
+            match ipmi::read_sensor_temp(&dev, sensor_cfg.id) {
+                Ok(temp) => {
+                    info!(
+                        controller = %ctrl_cfg.name,
+                        sensor = format!("0x{:02x}", sensor_cfg.id),
+                        label = %sensor_cfg.label,
+                        temp = format!("{temp:.0}°C"),
+                        "IPMI sensor found"
+                    );
+                    // Use per-sensor warn_temp if provided, take the minimum
+                    if let Some(sw) = sensor_cfg.warn_temp {
+                        warn_temp = Some(warn_temp.map_or(sw, |w: f64| w.min(sw)));
+                    }
+                    sensors.push(TempSensor::Ipmi {
+                        device: Arc::clone(&dev),
+                        sensor_id: sensor_cfg.id,
+                        label: sensor_cfg.label.clone(),
+                    });
+                }
+                Err(e) => {
+                    warn!(
+                        controller = %ctrl_cfg.name,
+                        sensor = format!("0x{:02x}", sensor_cfg.id),
+                        label = %sensor_cfg.label,
+                        error = %e,
+                        "IPMI sensor not available, skipping"
+                    );
+                }
+            }
+        }
+
+        if sensors.is_empty() {
+            warn!(controller = %ctrl_cfg.name, "no IPMI sensors available, disabling");
+            return None;
+        }
+
+        let warn_temp = match warn_temp {
+            Some(t) => t,
+            None => {
+                error!(
+                    controller = %ctrl_cfg.name,
+                    "no warn_temp available for IPMI controller (must be in config)"
+                );
+                std::process::exit(1);
+            }
+        };
+
+        Some((sensors, warn_temp))
+    } else {
+        warn!(controller = %ctrl_cfg.name, "no hwmon_driver or ipmi_sensors configured, disabling");
+        None
     }
 }
 

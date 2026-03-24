@@ -1,10 +1,10 @@
 # smfc-rs configuration for Quasar (H12SSL-i, EPYC 7663)
 #
-# Zone 0 (FAN1-5): Compute chamber — CPU, GPUs, NIC, NVMe
+# Zone 0 (FAN1-5): Compute chamber — CPU, GPUs, NIC, NVMe, VRMs, DIMMs
 # Zone 1 (FANA/B): Storage chamber — HDDs
 #
 # warn_temp is auto-detected from hwmon temp*_max (or temp*_crit fallback).
-# Config warn_temp overrides only if it's lower than the hardware-reported value.
+# For IPMI sensors, warn_temp must be in config (from BMC SDR "upper non-critical" threshold).
 #
 # PID gains are auto-derived from thermal_mass + active_cooling.
 # Set explicit kp/ki/kd to override the auto-derived values.
@@ -15,7 +15,7 @@ log_level = "info"
 min_duty_zone0 = 25
 min_duty_zone1 = 25
 
-# --- Zone 0: Compute Chamber ---
+# --- Zone 0: Compute Chamber (hwmon sources) ---
 
 [[controllers]]
 name = "cpu"
@@ -66,9 +66,100 @@ enabled = true
 temp_selector = { Specific = "Composite" }
 
 [controllers.pid]
-setpoint = 55.0
+setpoint = 60.0        # 70°C operating max, 77°C warn_temp — 10°C headroom
 thermal_mass = "medium" # mix of E1.S 15mm (aluminum heatsink shell) and bare M.2
 active_cooling = false
+
+# --- Zone 0: Compute Chamber (IPMI sensor sources) ---
+
+# GPU temps via BMC sensors (nvidia-open doesn't expose hwmon)
+# GPU5=Slot 1 (installed), GPU4=Slot 5, GPU3=Slot 3 (future)
+# Sensors auto-skip if GPU not installed
+[[controllers]]
+name = "gpu-bmc"
+zone = "zone0"
+poll_interval_secs = 5
+enabled = true
+temp_selector = "Max"
+
+[controllers.pid]
+setpoint = 70.0
+warn_temp = 84.0       # BMC upper non-critical threshold
+thermal_mass = "medium"
+active_cooling = true  # blower fan on GPU
+
+[[controllers.ipmi_sensors]]
+id = 0x74
+label = "GPU5"
+warn_temp = 84.0
+
+[[controllers.ipmi_sensors]]
+id = 0x73
+label = "GPU4"
+warn_temp = 84.0
+
+[[controllers.ipmi_sensors]]
+id = 0x72
+label = "GPU3"
+warn_temp = 84.0
+
+# VRM temps — low power, passively cooled by case airflow
+[[controllers]]
+name = "vrm"
+zone = "zone0"
+poll_interval_secs = 15
+enabled = true
+temp_selector = "Max"
+
+[controllers.pid]
+setpoint = 80.0
+warn_temp = 95.0       # BMC upper non-critical threshold for VRMs
+thermal_mass = "medium"
+active_cooling = false
+
+[[controllers.ipmi_sensors]]
+id = 0x10
+label = "CPU_VRM"
+warn_temp = 95.0
+
+[[controllers.ipmi_sensors]]
+id = 0x12
+label = "SOC_VRM"
+warn_temp = 95.0
+
+[[controllers.ipmi_sensors]]
+id = 0x14
+label = "VRMABCD"
+warn_temp = 95.0
+
+[[controllers.ipmi_sensors]]
+id = 0x16
+label = "VRMEFGH"
+warn_temp = 95.0
+
+# DIMM temps
+[[controllers]]
+name = "dimm"
+zone = "zone0"
+poll_interval_secs = 15
+enabled = true
+temp_selector = "Max"
+
+[controllers.pid]
+setpoint = 70.0
+warn_temp = 80.0       # BMC upper non-critical threshold for DIMMs
+thermal_mass = "medium"
+active_cooling = false
+
+[[controllers.ipmi_sensors]]
+id = 0xB0
+label = "DIMMA-D"
+warn_temp = 80.0
+
+[[controllers.ipmi_sensors]]
+id = 0xB1
+label = "DIMME-H"
+warn_temp = 80.0
 
 # --- Zone 1: Storage Chamber ---
 
@@ -81,6 +172,6 @@ enabled = true
 temp_selector = "Max"
 
 [controllers.pid]
-setpoint = 40.0
+setpoint = 35.0
 thermal_mass = "high"  # metal drive bodies, slow thermal response
 active_cooling = false
