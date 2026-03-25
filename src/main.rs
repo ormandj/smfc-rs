@@ -373,9 +373,34 @@ fn log_status(outputs: &[ControllerOutput]) {
         };
         let entry = by_zone.entry(zone_name.to_string()).or_default();
         let warn_marker = if o.warning { " WARN" } else { "" };
+
+        // Format per-sensor detail
+        let sensor_detail = if o.sensor_readings.is_empty() {
+            String::new()
+        } else if o.sensor_readings.len() > 4 {
+            // Many sensors of same type — show count and max
+            format!(
+                " [×{}:max={:.0}]",
+                o.sensor_readings.len(),
+                o.sensor_readings
+                    .iter()
+                    .map(|r| r.temp)
+                    .reduce(f64::max)
+                    .unwrap_or(0.0)
+            )
+        } else {
+            // Few distinct sensors — list each
+            let parts: Vec<String> = o
+                .sensor_readings
+                .iter()
+                .map(|r| format!("{}:{:.0}", r.label, r.temp))
+                .collect();
+            format!(" [{}]", parts.join(","))
+        };
+
         entry.push(format!(
-            "{}={:.1}°C→{}%{}",
-            o.controller_name, o.temp, o.duty, warn_marker
+            "{}={:.1}°C→{}%{}{}",
+            o.controller_name, o.temp, o.duty, warn_marker, sensor_detail
         ));
     }
 

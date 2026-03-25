@@ -2,6 +2,13 @@ use std::collections::HashMap;
 
 use crate::config::ZoneId;
 
+/// A single sensor reading for logging.
+#[derive(Debug, Clone)]
+pub struct SensorReading {
+    pub label: String,
+    pub temp: f64,
+}
+
 /// Output from a single thermal controller for one poll cycle.
 #[derive(Debug, Clone)]
 pub struct ControllerOutput {
@@ -10,6 +17,7 @@ pub struct ControllerOutput {
     pub temp: f64,
     pub controller_name: String,
     pub warning: bool,
+    pub sensor_readings: Vec<SensorReading>,
 }
 
 /// Arbitrates fan duty across multiple controllers targeting the same zone.
@@ -96,6 +104,7 @@ mod tests {
             duty,
             temp: 50.0,
             controller_name: name.to_string(),
+            sensor_readings: Vec::new(),
             warning: false,
         }
     }
