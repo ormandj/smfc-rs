@@ -14,6 +14,7 @@ use std::time::Duration;
 use clap::Parser;
 use tracing::{error, info, warn};
 
+use crate::config::IpmiSensorConfig;
 use crate::controller::{TempSensor, ThermalController};
 use crate::ipmi::{FanMode, IpmiZone};
 use crate::zone::{ControllerOutput, ZoneArbitrator};
@@ -108,19 +109,21 @@ fn main() {
         }
 
         // Build sensors from either hwmon or IPMI source
-        let (sensors, warn_temp) = match build_sensors(ctrl_cfg, &ipmi_dev) {
-            Some(result) => result,
+        let result = match build_sensors(ctrl_cfg, &ipmi_dev) {
+            Some(r) => r,
             None => continue,
         };
 
         let resolved = ctrl_cfg.pid.resolve();
+        let pending_count = result.pending.len();
         info!(
             controller = %ctrl_cfg.name,
             source = if ctrl_cfg.hwmon_driver.is_some() { "hwmon" } else { "ipmi" },
-            sensors = sensors.len(),
+            sensors = result.sensors.len(),
+            pending = pending_count,
             zone = ?ctrl_cfg.zone,
             setpoint = format!("{:.0}°C", ctrl_cfg.pid.setpoint),
-            warn_temp = format!("{warn_temp:.0}°C"),
+            warn_temp = format!("{:.0}°C", result.warn_temp),
             thermal_mass = ?ctrl_cfg.pid.thermal_mass,
             active_cooling = ctrl_cfg.pid.active_cooling,
             kp = format!("{:.2}", resolved.kp),
@@ -129,7 +132,18 @@ fn main() {
             "initialized"
         );
 
-        controllers.push(ThermalController::new(ctrl_cfg, sensors, warn_temp));
+        let pending_sensors: Vec<_> = result
+            .pending
+            .into_iter()
+            .map(|(cfg, dev)| ThermalController::make_pending(cfg, dev))
+            .collect();
+
+        controllers.push(ThermalController::new(
+            ctrl_cfg,
+            result.sensors,
+            pending_sensors,
+            result.warn_temp,
+        ));
     }
 
     if controllers.is_empty() {
@@ -206,12 +220,19 @@ fn main() {
     }
 }
 
+/// Sensor discovery result.
+struct SensorResult {
+    sensors: Vec<TempSensor>,
+    pending: Vec<(IpmiSensorConfig, Arc<ipmi::IpmiDevice>)>,
+    warn_temp: f64,
+}
+
 /// Build sensors and determine warn_temp for a controller config.
 /// Returns None if the controller should be disabled (no sensors found).
 fn build_sensors(
     ctrl_cfg: &config::ControllerConfig,
     ipmi_dev: &Option<Arc<ipmi::IpmiDevice>>,
-) -> Option<(Vec<TempSensor>, f64)> {
+) -> Option<SensorResult> {
     if let Some(ref driver) = ctrl_cfg.hwmon_driver {
         // hwmon-based controller
         let hwmon_sensors = match hwmon::discover_sensors(driver) {
@@ -248,7 +269,11 @@ fn build_sensors(
         };
 
         let sensors = hwmon_sensors.into_iter().map(TempSensor::Hwmon).collect();
-        Some((sensors, warn_temp))
+        Some(SensorResult {
+            sensors,
+            pending: Vec::new(),
+            warn_temp,
+        })
     } else if !ctrl_cfg.ipmi_sensors.is_empty() {
         // IPMI-based controller
         let dev = match ipmi_dev {
@@ -260,10 +285,10 @@ fn build_sensors(
         };
 
         let mut sensors = Vec::new();
+        let mut pending = Vec::new();
         let mut warn_temp: Option<f64> = ctrl_cfg.pid.warn_temp;
 
         for sensor_cfg in &ctrl_cfg.ipmi_sensors {
-            // Test-read the sensor to see if it's present
             match ipmi::read_sensor_temp(&dev, sensor_cfg.id) {
                 Ok(temp) => {
                     info!(
@@ -273,7 +298,6 @@ fn build_sensors(
                         temp = format!("{temp:.0}°C"),
                         "IPMI sensor found"
                     );
-                    // Use per-sensor warn_temp if provided, take the minimum
                     if let Some(sw) = sensor_cfg.warn_temp {
                         warn_temp = Some(warn_temp.map_or(sw, |w: f64| w.min(sw)));
                     }
@@ -289,29 +313,49 @@ fn build_sensors(
                         sensor = format!("0x{:02x}", sensor_cfg.id),
                         label = %sensor_cfg.label,
                         error = %e,
-                        "IPMI sensor not available, skipping"
+                        "IPMI sensor not available, will retry periodically"
                     );
+                    pending.push((sensor_cfg.clone(), Arc::clone(&dev)));
                 }
             }
         }
 
-        if sensors.is_empty() {
+        if sensors.is_empty() && pending.is_empty() {
             warn!(controller = %ctrl_cfg.name, "no IPMI sensors available, disabling");
             return None;
         }
 
+        // If no sensors found yet but some are pending, use the config warn_temp
+        // (pending sensors will update warn_temp when they come online)
         let warn_temp = match warn_temp {
             Some(t) => t,
-            None => {
+            None if !sensors.is_empty() => {
                 error!(
                     controller = %ctrl_cfg.name,
                     "no warn_temp available for IPMI controller (must be in config)"
                 );
                 std::process::exit(1);
             }
+            // All sensors pending — use a safe default from config or first sensor config
+            None => ctrl_cfg
+                .ipmi_sensors
+                .iter()
+                .filter_map(|s| s.warn_temp)
+                .reduce(f64::min)
+                .unwrap_or_else(|| {
+                    error!(
+                        controller = %ctrl_cfg.name,
+                        "no warn_temp available for IPMI controller (must be in config)"
+                    );
+                    std::process::exit(1);
+                }),
         };
 
-        Some((sensors, warn_temp))
+        Some(SensorResult {
+            sensors,
+            pending,
+            warn_temp,
+        })
     } else {
         warn!(controller = %ctrl_cfg.name, "no hwmon_driver or ipmi_sensors configured, disabling");
         None

@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
-use crate::config::{ControllerConfig, TempSelector, ZoneId};
+use crate::config::{ControllerConfig, IpmiSensorConfig, TempSelector, ZoneId};
 use crate::error::Result;
 use crate::hwmon::HwmonSensor;
 use crate::ipmi::IpmiDevice;
@@ -49,11 +49,19 @@ impl TempSensor {
     }
 }
 
+/// An IPMI sensor that failed discovery and should be retried.
+pub struct PendingIpmiSensor {
+    config: IpmiSensorConfig,
+    device: Arc<IpmiDevice>,
+}
+
 /// A thermal controller that reads sensors, runs a PID loop, and outputs a duty.
 pub struct ThermalController {
     pub name: String,
     pub zone: ZoneId,
     sensors: Vec<TempSensor>,
+    pending_sensors: Vec<PendingIpmiSensor>,
+    last_retry: Option<Instant>,
     temp_selector: TempSelector,
     pid: PidController,
     warn_temp: f64,
@@ -62,8 +70,15 @@ pub struct ThermalController {
     last_temp: Option<f64>,
 }
 
+const RETRY_INTERVAL: Duration = Duration::from_secs(30);
+
 impl ThermalController {
-    pub fn new(config: &ControllerConfig, sensors: Vec<TempSensor>, warn_temp: f64) -> Self {
+    pub fn new(
+        config: &ControllerConfig,
+        sensors: Vec<TempSensor>,
+        pending_sensors: Vec<PendingIpmiSensor>,
+        warn_temp: f64,
+    ) -> Self {
         let resolved = config.pid.resolve();
         let pid = PidController::new(PidParams {
             setpoint: resolved.setpoint,
@@ -80,6 +95,8 @@ impl ThermalController {
             name: config.name.clone(),
             zone: config.zone.clone(),
             sensors,
+            pending_sensors,
+            last_retry: None,
             temp_selector: config.temp_selector.clone(),
             pid,
             warn_temp,
@@ -89,9 +106,17 @@ impl ThermalController {
         }
     }
 
+    /// Create a PendingIpmiSensor from a config + device.
+    pub fn make_pending(config: IpmiSensorConfig, device: Arc<IpmiDevice>) -> PendingIpmiSensor {
+        PendingIpmiSensor { config, device }
+    }
+
     /// Check if it's time to poll, and if so, read sensors and compute duty.
     pub fn poll(&mut self) -> Option<ControllerOutput> {
         let now = Instant::now();
+
+        // Retry pending IPMI sensors periodically
+        self.retry_pending_sensors(now);
 
         if let Some(last) = self.last_poll
             && now.duration_since(last) < self.poll_interval
@@ -163,6 +188,47 @@ impl ThermalController {
             controller_name: self.name.clone(),
             warning: false,
         })
+    }
+
+    fn retry_pending_sensors(&mut self, now: Instant) {
+        if self.pending_sensors.is_empty() {
+            return;
+        }
+
+        if let Some(last) = self.last_retry
+            && now.duration_since(last) < RETRY_INTERVAL
+        {
+            return;
+        }
+        self.last_retry = Some(now);
+
+        let mut still_pending = Vec::new();
+        for pending in self.pending_sensors.drain(..) {
+            match crate::ipmi::read_sensor_temp(&pending.device, pending.config.id) {
+                Ok(temp) => {
+                    info!(
+                        controller = %self.name,
+                        sensor = format!("0x{:02x}", pending.config.id),
+                        label = %pending.config.label,
+                        temp = format!("{temp:.0}°C"),
+                        "IPMI sensor now available (late discovery)"
+                    );
+                    // Update warn_temp if this sensor has a lower threshold
+                    if let Some(sw) = pending.config.warn_temp {
+                        self.warn_temp = self.warn_temp.min(sw);
+                    }
+                    self.sensors.push(TempSensor::Ipmi {
+                        device: Arc::clone(&pending.device),
+                        sensor_id: pending.config.id,
+                        label: pending.config.label.clone(),
+                    });
+                }
+                Err(_) => {
+                    still_pending.push(pending);
+                }
+            }
+        }
+        self.pending_sensors = still_pending;
     }
 
     fn read_temp(&self) -> Result<f64> {
