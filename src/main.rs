@@ -381,10 +381,12 @@ fn log_status(outputs: &[ControllerOutput], min_duty_zone0: u8, min_duty_zone1: 
             config::ZoneId::Zone0 => "zone0",
             config::ZoneId::Zone1 => "zone1",
         };
-        let info = by_zone.entry(zone_name.to_string()).or_insert_with(|| ZoneInfo {
-            details: Vec::new(),
-            max_duty_output: None,
-        });
+        let info = by_zone
+            .entry(zone_name.to_string())
+            .or_insert_with(|| ZoneInfo {
+                details: Vec::new(),
+                max_duty_output: None,
+            });
 
         // Track the controller with the highest duty for this zone
         let is_new_max = info
@@ -435,9 +437,7 @@ fn log_status(outputs: &[ControllerOutput], min_duty_zone0: u8, min_duty_zone1: 
         };
 
         let (driver, effective_duty) = match &zone_info.max_duty_output {
-            Some((name, temp, duty)) if *duty >= floor => {
-                (format!("{name}:{temp:.1}°C"), *duty)
-            }
+            Some((name, temp, duty)) if *duty >= floor => (format!("{name}:{temp:.1}°C"), *duty),
             Some((_, _, duty)) => {
                 // Floor is higher than any controller output
                 (format!("floor:{floor}%"), floor.max(*duty))
