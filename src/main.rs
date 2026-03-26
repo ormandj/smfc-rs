@@ -204,7 +204,11 @@ fn main() {
             log_counter += 1;
             if log_counter >= 30 || !updates.is_empty() {
                 log_counter = 0;
-                log_status(&outputs);
+                log_status(
+                    &outputs,
+                    cfg.general.min_duty_zone0,
+                    cfg.general.min_duty_zone1,
+                );
             }
         }
     }
@@ -362,16 +366,35 @@ fn build_sensors(
     }
 }
 
-fn log_status(outputs: &[ControllerOutput]) {
+fn log_status(outputs: &[ControllerOutput], min_duty_zone0: u8, min_duty_zone1: u8) {
     use std::collections::HashMap;
-    let mut by_zone: HashMap<String, Vec<String>> = HashMap::new();
+
+    struct ZoneInfo {
+        details: Vec<String>,
+        max_duty_output: Option<(String, f64, u8)>, // (controller_name, temp, duty)
+    }
+
+    let mut by_zone: HashMap<String, ZoneInfo> = HashMap::new();
 
     for o in outputs {
         let zone_name = match o.zone {
             config::ZoneId::Zone0 => "zone0",
             config::ZoneId::Zone1 => "zone1",
         };
-        let entry = by_zone.entry(zone_name.to_string()).or_default();
+        let info = by_zone.entry(zone_name.to_string()).or_insert_with(|| ZoneInfo {
+            details: Vec::new(),
+            max_duty_output: None,
+        });
+
+        // Track the controller with the highest duty for this zone
+        let is_new_max = info
+            .max_duty_output
+            .as_ref()
+            .is_none_or(|(_, _, d)| o.duty > *d);
+        if is_new_max {
+            info.max_duty_output = Some((o.controller_name.clone(), o.temp, o.duty));
+        }
+
         let warn_marker = if o.warning { " WARN" } else { "" };
 
         // Format per-sensor detail
@@ -398,30 +421,35 @@ fn log_status(outputs: &[ControllerOutput]) {
             format!(" [{}]", parts.join(","))
         };
 
-        entry.push(format!(
+        info.details.push(format!(
             "{}={:.1}°C→{}%{}{}",
             o.controller_name, o.temp, o.duty, warn_marker, sensor_detail
         ));
     }
 
-    for (zone, parts) in &by_zone {
-        let max_duty = outputs
-            .iter()
-            .filter(|o| {
-                let zn = match o.zone {
-                    config::ZoneId::Zone0 => "zone0",
-                    config::ZoneId::Zone1 => "zone1",
-                };
-                zn == zone
-            })
-            .map(|o| o.duty)
-            .max()
-            .unwrap_or(0);
+    for (zone, zone_info) in &by_zone {
+        let floor = match zone.as_str() {
+            "zone0" => min_duty_zone0,
+            "zone1" => min_duty_zone1,
+            _ => 0,
+        };
+
+        let (driver, effective_duty) = match &zone_info.max_duty_output {
+            Some((name, temp, duty)) if *duty >= floor => {
+                (format!("{name}:{temp:.1}°C"), *duty)
+            }
+            Some((_, _, duty)) => {
+                // Floor is higher than any controller output
+                (format!("floor:{floor}%"), floor.max(*duty))
+            }
+            None => ("none".to_string(), floor),
+        };
 
         info!(
+            duty = effective_duty,
+            driver = driver.as_str(),
             zone = zone.as_str(),
-            duty = max_duty,
-            details = parts.join(", ").as_str(),
+            details = zone_info.details.join(", ").as_str(),
             "status"
         );
     }
