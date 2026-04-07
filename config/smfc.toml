@@ -172,6 +172,6 @@ enabled = true
 temp_selector = "Max"
 
 [controllers.pid]
-setpoint = 35.0
+setpoint = 40.0
 thermal_mass = "high"  # metal drive bodies, slow thermal response
 active_cooling = false
