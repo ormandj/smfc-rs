@@ -26,7 +26,7 @@ enabled = true
 temp_selector = { Specific = "Tctl" }
 
 [controllers.pid]
-setpoint = 50.0
+setpoint = 65.0
 warn_temp = 80.0      # k10temp has no temp*_max; EPYC Tctl_max ~95°C
 thermal_mass = "medium"
 active_cooling = true  # FAN5 on CPU heatsink
@@ -73,7 +73,7 @@ active_cooling = false
 # --- Zone 0: Compute Chamber (IPMI sensor sources) ---
 
 # GPU temps via BMC sensors (nvidia-open doesn't expose hwmon)
-# GPU5=Slot 1 (installed), GPU4=Slot 5, GPU3=Slot 3 (future)
+# GPU5=Slot 1, GPU4=Slot 3, GPU3=Slot 5
 # Sensors auto-skip if GPU not installed
 [[controllers]]
 name = "gpu-bmc"
@@ -83,7 +83,7 @@ enabled = true
 temp_selector = "Max"
 
 [controllers.pid]
-setpoint = 70.0
+setpoint = 75.0
 warn_temp = 84.0       # BMC upper non-critical threshold
 thermal_mass = "medium"
 active_cooling = true  # blower fan on GPU

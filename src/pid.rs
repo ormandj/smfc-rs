@@ -66,6 +66,24 @@ impl PidController {
 
         // Integral (accumulated before clamping, undone if saturated)
         self.integral += error * dt;
+        // Clamp integral so its contribution can never exceed the actuator range.
+        // Bounds windup even when output never hits max_output exactly.
+        if self.ki.abs() > f64::EPSILON {
+            let i_limit = (self.max_output - self.min_output) / self.ki.abs();
+            self.integral = self.integral.clamp(-i_limit, i_limit);
+        }
+        // Leaky integrator inside a deadband: when the process sits at the
+        // setpoint (error ≈ 0), slowly bleed the integral toward zero so a
+        // past transient can't hold the actuator high indefinitely. The P and
+        // D terms are zero here, so any steady-state duty is coming from the
+        // integral alone — if it's excessive, temperature will rise and the
+        // integral will rebuild to the correct level.
+        const INTEGRAL_DEADBAND: f64 = 0.5; // °C
+        const INTEGRAL_LEAK_PER_SEC: f64 = 0.005; // ~140s half-life at setpoint
+        if error.abs() < INTEGRAL_DEADBAND {
+            let decay = (1.0 - INTEGRAL_LEAK_PER_SEC * dt).max(0.0);
+            self.integral *= decay;
+        }
         let i_term = self.ki * self.integral;
 
         // Derivative with EMA filtering
@@ -178,6 +196,32 @@ mod tests {
         assert!(
             pid.output() < 50.0,
             "expected < 50.0 after cooldown, got {}",
+            pid.output()
+        );
+    }
+
+    #[test]
+    fn integral_does_not_wind_up_below_saturation() {
+        // Reproduces the zone1 HDD bug: error briefly positive, then pinned at
+        // setpoint (error=0) forever. Output must not be held high by a wound-up
+        // integral when P and D terms are both ~0.
+        let mut pid = PidController::new(PidParams {
+            max_rate: 200.0, // don't let rate limiting mask the effect
+            ..default_params()
+        });
+        // Wind up while above setpoint (setpoint=60, temp=68)
+        for _ in 0..50 {
+            pid.update(68.0, 30.0);
+        }
+        // Now pinned at setpoint forever
+        for _ in 0..200 {
+            pid.update(60.0, 30.0);
+        }
+        // With error=0 and a bounded integral, output should decay toward min.
+        // Without the clamp, the wound-up integral would hold it near max.
+        assert!(
+            pid.output() < 40.0,
+            "integral wound up: output={}",
             pid.output()
         );
     }
